@@ -16,6 +16,7 @@ import pygame
 import random
 import sys
 import math
+from snake_ai import SnakeAI
 
 # 初始化Pygame
 pygame.init()
@@ -24,15 +25,18 @@ pygame.init()
 WINDOW_SIZE = 600           # 游戏窗口大小（像素）
 CELL_SIZE = 20             # 蛇身和食物的基础大小（像素）
 SEGMENT_DISTANCE = 15      # 蛇身节段间的固定距离（像素）
+SNAKE2_MOVE_INTERVAL = 80  # AI初始移动间隔（毫秒）- 提高决策频率
 GRID_WIDTH = WINDOW_SIZE // CELL_SIZE    # 网格宽度（用于边界计算）
 GRID_HEIGHT = WINDOW_SIZE // CELL_SIZE   # 网格高度（用于边界计算）
 
 # ============= 颜色常量定义 =============
 BLACK = (0, 0, 0)          # 背景色：黑色
-GREEN = (0, 255, 0)        # 蛇身色：亮绿色
+GREEN = (0, 255, 0)        # 玩家1蛇身色：亮绿色
 RED = (255, 0, 0)          # 食物色：红色
 WHITE = (255, 255, 255)    # 文字色：白色
-DARK_GREEN = (0, 150, 0)   # 蛇头色：暗绿色
+DARK_GREEN = (0, 150, 0)   # 玩家1蛇头色：暗绿色
+BLUE = (0, 100, 255)       # 玩家2蛇身色：亮蓝色
+DARK_BLUE = (0, 50, 150)   # 玩家2蛇头色：暗蓝色
 
 class SnakeGame:
     """
@@ -66,6 +70,9 @@ class SnakeGame:
         # 初始化时钟控制器（控制帧率）
         self.clock = pygame.time.Clock()
         
+        # 初始化AI控制器
+        self.ai_controller = SnakeAI(WINDOW_SIZE, CELL_SIZE, SEGMENT_DISTANCE)
+        
         # 尝试加载中文字体，失败则使用默认字体
         try:
             self.font = pygame.font.Font("C:/Windows/Fonts/simsun.ttc", 36)
@@ -80,40 +87,56 @@ class SnakeGame:
         重置游戏状态
         
         将游戏重置到初始状态，包括：
-        - 重置蛇的位置和长度
+        - 重置两条蛇的位置和长度
         - 清空移动轨迹
         - 重新生成食物
-        - 重置分数和游戏状态标志
+        - 重置双方分数和游戏状态标志
         """
-        # 计算屏幕中心位置作为蛇的初始位置
+        # 计算屏幕中心位置和初始位置
         center_x = WINDOW_SIZE // 2
         center_y = WINDOW_SIZE // 2
         
-        # ============= 蛇身系统初始化 =============
+        # ============= 玩家1蛇身系统初始化（鼠标控制，轨迹跟随）=============
         # 轨迹跟随系统：记录蛇头的完整移动历史
-        self.snake_trail = [(center_x, center_y)]  # 蛇头移动轨迹列表
-        self.snake_length = 1                      # 当前蛇的长度（节数）
-        self.snake = [(center_x, center_y)]        # 当前蛇身各节段的位置
+        self.snake1_trail = [(center_x - 100, center_y)]  # 玩家1蛇头移动轨迹列表
+        self.snake1_length = 1                            # 玩家1蛇的长度（节数）
+        self.snake1 = [(center_x - 100, center_y)]        # 玩家1蛇身各节段的位置
+        
+        # ============= 玩家2蛇身系统初始化（键盘控制，方向移动）=============
+        self.snake2_trail = [(center_x + 100, center_y)]  # 玩家2蛇头移动轨迹列表
+        self.snake2_length = 1                            # 玩家2蛇的长度（节数）
+        self.snake2 = [(center_x + 100, center_y)]        # 玩家2蛇身各节段的位置
+        self.snake2_direction = (0, 0)                    # 玩家2初始方向：静止，等待按键
+        self.snake2_pos = (center_x + 100, center_y)      # 玩家2当前位置
+        self.snake2_last_move_time = 0                    # 玩家2上次移动时间
         
         # ============= 控制和输入系统 =============
-        self.mouse_pos = (center_x, center_y)      # 当前鼠标位置
+        self.mouse_pos = (center_x - 100, center_y)       # 玩家1鼠标位置
         
         # ============= 食物系统初始化 =============
         self.foods = []                            # 食物列表（支持多个食物同时存在）
         self.generate_foods(5)                     # 初始生成5个食物
         
         # ============= 游戏状态变量 =============
-        self.score = 0                             # 当前分数
+        self.score1 = 0                           # 玩家1分数
+        self.score2 = 0                           # 玩家2分数
         self.game_over = False                     # 游戏结束标志
         self.game_started = False                  # 游戏开始标志
+        self.winner = None                         # 胜利者（1或2，None表示平局）
         self.pending_growth = 0                    # 待增长的身体节段数（暂未使用）
+        
+        # ============= AI动态速度系统 =============
+        self.game_start_time = 0                   # 游戏开始时间（毫秒）
+        self.current_ai_interval = SNAKE2_MOVE_INTERVAL  # 当前AI移动间隔
+        self.speed_increase_rate = 0.98            # 速度递增率（每次递减2%间隔）
+        self.min_ai_interval = 30                  # 最小AI移动间隔（毫秒）
         
     def generate_food(self):
         """
         生成单个食物
         
         在游戏区域内随机生成一个食物，确保：
-        - 不与蛇身重叠（距离至少1.5倍CELL_SIZE）
+        - 不与两条蛇身重叠（距离至少1.5倍CELL_SIZE）
         - 不与现有食物过近（距离至少2倍CELL_SIZE）
         - 在边界内的安全区域
         
@@ -131,13 +154,21 @@ class SnakeGame:
             food_y = random.randint(CELL_SIZE, WINDOW_SIZE - CELL_SIZE)
             food = (food_x, food_y)
             
-            # 检查与蛇身的距离冲突
+            # 检查与两条蛇身的距离冲突
             too_close_to_snake = False
-            for segment in self.snake:
+            # 检查玩家1的蛇
+            for segment in self.snake1:
                 distance = math.sqrt((food[0] - segment[0])**2 + (food[1] - segment[1])**2)
                 if distance < CELL_SIZE * 1.5:  # 与蛇身保持1.5倍安全距离
                     too_close_to_snake = True
                     break
+            # 检查玩家2的蛇
+            if not too_close_to_snake:
+                for segment in self.snake2:
+                    distance = math.sqrt((food[0] - segment[0])**2 + (food[1] - segment[1])**2)
+                    if distance < CELL_SIZE * 1.5:  # 与蛇身保持1.5倍安全距离
+                        too_close_to_snake = True
+                        break
             
             # 检查与现有食物的距离冲突
             too_close_to_food = False
@@ -260,7 +291,7 @@ class SnakeGame:
                     random_index = random.randint(0, len(self.foods) - 1)
                     self.foods.pop(random_index)
     
-    def get_position_on_trail(self, distance):
+    def get_position_on_trail(self, distance, snake_trail):
         """
         根据指定距离在蛇头移动轨迹上找到精确位置
         
@@ -278,6 +309,7 @@ class SnakeGame:
         
         参数:
             distance (float): 从轨迹起点(蛇头位置)开始的距离
+            snake_trail (list): 蛇头移动轨迹列表
             
         返回:
             tuple: 对应距离处的(x, y)坐标位置
@@ -287,17 +319,17 @@ class SnakeGame:
         - 距离超出轨迹总长度时返回轨迹末端位置
         """
         # ============= 边界条件检查 =============
-        if not self.snake_trail or distance <= 0:
+        if not snake_trail or distance <= 0:
             # 轨迹为空或距离无效时，返回蛇头位置或默认中心位置
-            return self.snake_trail[0] if self.snake_trail else (WINDOW_SIZE//2, WINDOW_SIZE//2)
+            return snake_trail[0] if snake_trail else (WINDOW_SIZE//2, WINDOW_SIZE//2)
         
         # ============= 轨迹遍历和距离累积 =============
         current_distance = 0  # 当前已累积的距离
         
         # 遍历轨迹中的每个线段(相邻两点之间的连线)
-        for i in range(len(self.snake_trail) - 1):
-            point1 = self.snake_trail[i]      # 线段起点(距离蛇头更近)
-            point2 = self.snake_trail[i + 1]  # 线段终点(距离蛇头更远)
+        for i in range(len(snake_trail) - 1):
+            point1 = snake_trail[i]      # 线段起点(距离蛇头更近)
+            point2 = snake_trail[i + 1]  # 线段终点(距离蛇头更远)
             
             # ============= 计算线段长度 =============
             # 使用欧几里得距离公式计算两点间直线距离
@@ -327,43 +359,19 @@ class SnakeGame:
         # ============= 处理超出轨迹长度的情况 =============
         # 如果目标距离超过整个轨迹的总长度，返回轨迹的最末端位置
         # 这确保了即使轨迹很短也能为每个蛇身节段找到合理位置
-        return self.snake_trail[-1]
+        return snake_trail[-1]
     
     def update_snake_body(self):
         """
-        根据轨迹和蛇长度更新蛇身各节段位置 - 实现蛇头增长机制
-        
-        这个方法是轨迹跟随系统的执行部分，负责将蛇身各节段精确定位在轨迹上：
-        
-        蛇头增长机制核心特点：
-        1. 蛇头始终位于轨迹的起始点(距离=0)
-        2. 新增长的节段出现在蛇头附近，而不是蛇尾
-        3. 每个节段按递增距离分布，形成连续的蛇身
-        4. 使用压缩系数(0.8)让新节段更紧密地跟随蛇头
-        
-        算法步骤：
-        1. 清空当前蛇身位置列表
-        2. 为每个节段计算在轨迹上的目标距离
-        3. 调用get_position_on_trail()获取精确位置坐标
-        4. 重建完整的蛇身位置列表
-        
-        距离分布公式：
-        - 蛇头: distance = 0 (始终在轨迹起点)
-        - 其他节段: distance = (i * 0.8 + 0.2) * SEGMENT_DISTANCE
-          其中i为节段索引，0.8为压缩系数，0.2为偏移量
-        
-        增长效果：
-        - 当蛇长度增加时，新节段出现在靠近蛇头的位置
-        - 形成从头部向尾部的平滑延伸效果
-        - 保持节段间的相对距离稳定
+        根据轨迹和蛇长度更新玩家1蛇身各节段位置 - 实现蛇头增长机制
         """
         # ============= 重置蛇身位置列表 =============
         # 清空当前蛇身，准备重新计算所有节段位置
-        self.snake = []
+        self.snake1 = []
         
         # ============= 逐节段计算位置 =============
         # 遍历蛇的每个节段，从蛇头(索引0)到蛇尾
-        for i in range(self.snake_length):
+        for i in range(self.snake1_length):
             if i == 0:
                 # ============= 蛇头位置处理 =============
                 # 蛇头始终位于轨迹的最前端(距离为0)
@@ -371,34 +379,42 @@ class SnakeGame:
                 distance = 0
             else:
                 # ============= 蛇身节段位置计算 =============
-                # 使用特殊的距离分布公式实现蛇头增长效果：
-                # 
-                # 公式解析：(i * 0.8 + 0.2) * SEGMENT_DISTANCE
-                # - i: 节段索引(1, 2, 3, ...)
-                # - 0.8: 压缩系数，让节段更紧密分布
-                # - 0.2: 基础偏移，防止节段重叠
-                # - SEGMENT_DISTANCE: 基础间距(15像素)
-                #
-                # 实际距离序列：
-                # 节段1: (1*0.8+0.2)*15 = 15像素
-                # 节段2: (2*0.8+0.2)*15 = 27像素  
-                # 节段3: (3*0.8+0.2)*15 = 39像素
-                # 节段4: (4*0.8+0.2)*15 = 51像素
-                # ...
-                #
-                # 这种分布的优势：
-                # 1. 新节段出现在靠近蛇头的位置
-                # 2. 节段间距离逐渐增加，形成自然的延伸效果
-                # 3. 避免了传统蛇尾延长的不自然感
                 distance = (i * 0.8 + 0.2) * SEGMENT_DISTANCE
             
             # ============= 获取节段在轨迹上的精确位置 =============
             # 调用轨迹定位算法，根据计算出的距离找到对应的坐标
-            position = self.get_position_on_trail(distance)
+            position = self.get_position_on_trail(distance, self.snake1_trail)
             
             # ============= 将位置添加到蛇身列表 =============
             # 按顺序构建完整的蛇身：[蛇头, 节段1, 节段2, ...]
-            self.snake.append(position)
+            self.snake1.append(position)
+    
+    def update_snake2_body(self):
+        """
+        根据轨迹和蛇长度更新玩家2蛇身各节段位置 - 实现蛇头增长机制
+        """
+        # ============= 重置蛇身位置列表 =============
+        # 清空当前蛇身，准备重新计算所有节段位置
+        self.snake2 = []
+        
+        # ============= 逐节段计算位置 =============
+        # 遍历蛇的每个节段，从蛇头(索引0)到蛇尾
+        for i in range(self.snake2_length):
+            if i == 0:
+                # ============= 蛇头位置处理 =============
+                # 蛇头始终位于轨迹的最前端(距离为0)
+                distance = 0
+            else:
+                # ============= 蛇身节段位置计算 =============
+                distance = (i * 0.8 + 0.2) * SEGMENT_DISTANCE
+            
+            # ============= 获取节段在轨迹上的精确位置 =============
+            # 调用轨迹定位算法，根据计算出的距离找到对应的坐标
+            position = self.get_position_on_trail(distance, self.snake2_trail)
+            
+            # ============= 将位置添加到蛇身列表 =============
+            # 按顺序构建完整的蛇身：[蛇头, 节段1, 节段2, ...]
+            self.snake2.append(position)
                 
     def handle_events(self):
         """
@@ -429,6 +445,10 @@ class SnakeGame:
                     # 这个条件检查防止了游戏进行中误触重启
                     self.reset_game()
                     
+                # ============= AI控制玩家2 =============
+                # 玩家2现在完全由AI控制，无需键盘输入
+                # AI将在update()方法中做出决策
+                    
             # ============= 处理鼠标移动事件 =============
             elif event.type == pygame.MOUSEMOTION:
                 if not self.game_over:
@@ -448,125 +468,221 @@ class SnakeGame:
         
     def update(self):
         """
-        游戏主逻辑更新方法 - 处理所有游戏状态变化
+        双蛇对战游戏主逻辑更新方法
         
-        这是游戏的核心方法，每帧都会被调用，负责：
-        1. 蛇头位置更新和轨迹记录
+        处理两条蛇的所有游戏状态变化：
+        1. 玩家1(鼠标控制)和玩家2(WASD控制)的位置更新
         2. 边界碰撞检测
-        3. 食物碰撞检测和消耗
-        4. 蛇身长度增长和分数更新
+        3. 食物碰撞检测(支持双蛇竞争)
+        4. 蛇与蛇碰撞检测
         5. 自身碰撞检测
-        6. 蛇身位置重新计算
-        
-        方法会在游戏结束或未开始时直接返回，避免不必要的计算。
+        6. 胜负判断
         """
         # ============= 游戏状态检查 =============
-        # 如果游戏已结束或尚未开始，跳过所有更新逻辑
-        # 这是性能优化，避免在非游戏状态下进行复杂计算
         if self.game_over or not self.game_started:
             return
             
-        # ============= 蛇头位置更新 =============
-        # 将鼠标当前位置设置为蛇头的新目标位置
-        # 这实现了完全的鼠标跟随控制机制
-        new_head = self.mouse_pos
+        # ============= 玩家1蛇头位置更新(鼠标控制) =============
+        new_head1 = self.mouse_pos
         
-        # ============= 移动检测优化 =============
-        # 检查蛇头是否实际发生了位置变化
-        # 如果鼠标没有移动，蛇保持静止状态，节省计算资源
-        if len(self.snake_trail) > 0 and new_head == self.snake_trail[0]:
-            return  # 鼠标位置未变化，跳过本次更新
+        # 检查玩家1是否移动
+        player1_moved = True
+        if len(self.snake1_trail) > 0 and new_head1 == self.snake1_trail[0]:
+            player1_moved = False
+        
+        # ============= 玩家2蛇头位置更新(AI控制-智能决策) =============
+        # 获取当前时间
+        current_time = pygame.time.get_ticks()
+        
+        # 记录游戏开始时间
+        if self.game_started and self.game_start_time == 0:
+            self.game_start_time = current_time
+        
+        # 计算动态AI移动间隔（随时间递减，速度递增）
+        if self.game_start_time > 0:
+            elapsed_seconds = (current_time - self.game_start_time) / 1000.0
+            # 每10秒减速2%（间隔减少2%）
+            speed_multiplier = self.speed_increase_rate ** (elapsed_seconds / 10.0)
+            self.current_ai_interval = max(
+                self.min_ai_interval,
+                int(SNAKE2_MOVE_INTERVAL * speed_multiplier)
+            )
+        
+        # 检查是否到了玩家2的移动时间（使用动态间隔）
+        if current_time - self.snake2_last_move_time >= self.current_ai_interval:
+            # AI决策：获取最优移动方向
+            ai_direction = self.ai_controller.get_next_direction(
+                my_snake=self.snake2.copy(),  # AI控制的蛇（玩家2）
+                opponent_snake=self.snake1.copy(),  # 对手（玩家1）
+                foods=self.foods.copy(),  # 食物列表
+                current_direction=self.snake2_direction  # 当前方向
+            )
+            
+            # 更新AI决定的方向
+            self.snake2_direction = ai_direction
+            
+            # 如果AI决定移动
+            if self.snake2_direction != (0, 0):
+                # 时间到了且有方向，更新玩家2位置
+                new_head2 = (
+                    self.snake2_pos[0] + self.snake2_direction[0] * SEGMENT_DISTANCE,
+                    self.snake2_pos[1] + self.snake2_direction[1] * SEGMENT_DISTANCE
+                )
+                self.snake2_pos = new_head2
+                self.snake2_last_move_time = current_time
+                player2_moved = True
+                
+                # AI开始移动后，游戏自动开始
+                self.game_started = True
+            else:
+                # AI决定不移动
+                new_head2 = self.snake2_pos
+                player2_moved = False
+        else:
+            # 还没到移动时间，玩家2保持原位
+            new_head2 = self.snake2_pos
+            player2_moved = False
         
         # ============= 边界碰撞检测 =============
-        # 检查蛇头是否触碰到游戏区域边界
-        # 使用CELL_SIZE//2作为碰撞边界，给蛇头留出半个身体的缓冲空间
-        boundary_left = CELL_SIZE // 2        # 左边界
-        boundary_right = WINDOW_SIZE - CELL_SIZE // 2  # 右边界  
-        boundary_top = CELL_SIZE // 2         # 上边界
-        boundary_bottom = WINDOW_SIZE - CELL_SIZE // 2  # 下边界
+        boundary_left = CELL_SIZE // 2
+        boundary_right = WINDOW_SIZE - CELL_SIZE // 2
+        boundary_top = CELL_SIZE // 2
+        boundary_bottom = WINDOW_SIZE - CELL_SIZE // 2
         
-        if (new_head[0] < boundary_left or new_head[0] >= boundary_right or 
-            new_head[1] < boundary_top or new_head[1] >= boundary_bottom):
-            # 蛇头超出边界，游戏结束
+        # 检查玩家1边界碰撞(仅在移动时)
+        if player1_moved and (new_head1[0] < boundary_left or new_head1[0] >= boundary_right or 
+            new_head1[1] < boundary_top or new_head1[1] >= boundary_bottom):
             self.game_over = True
+            self.winner = 2  # 玩家2获胜
+            return
+            
+        # 检查玩家2边界碰撞(仅在移动时)
+        if player2_moved and (new_head2[0] < boundary_left or new_head2[0] >= boundary_right or 
+            new_head2[1] < boundary_top or new_head2[1] >= boundary_bottom):
+            self.game_over = True
+            self.winner = 1  # 玩家1获胜
             return
         
-        # ============= 轨迹系统更新 =============
-        # 将蛇头的新位置添加到移动轨迹的最前端
-        # 轨迹记录了蛇头的完整移动历史，是蛇身跟随系统的基础
-        self.snake_trail.insert(0, new_head)
+        # ============= 更新轨迹系统 =============
+        # 玩家1轨迹更新(仅在移动时)
+        if player1_moved:
+            self.snake1_trail.insert(0, new_head1)
+            max_trail_length1 = self.snake1_length * SEGMENT_DISTANCE + 100
+            if len(self.snake1_trail) > max_trail_length1:
+                self.snake1_trail = self.snake1_trail[:max_trail_length1]
         
-        # ============= 轨迹内存管理 =============
-        # 限制轨迹长度以防止内存无限增长
-        # 轨迹长度基于蛇身长度动态计算，保留足够的历史记录
-        max_trail_length = self.snake_length * SEGMENT_DISTANCE + 100
-        if len(self.snake_trail) > max_trail_length:
-            # 截断过长的轨迹，保留最近的移动历史
-            self.snake_trail = self.snake_trail[:max_trail_length]
+        # 玩家2轨迹更新(仅在移动时)
+        if player2_moved:
+            self.snake2_trail.insert(0, new_head2)
+            max_trail_length2 = self.snake2_length * SEGMENT_DISTANCE + 100
+            if len(self.snake2_trail) > max_trail_length2:
+                self.snake2_trail = self.snake2_trail[:max_trail_length2]
         
-        # ============= 食物碰撞检测 =============
-        # 遍历所有食物，检测是否被蛇头吃到
-        eaten_food_index = -1  # 被吃掉的食物索引，-1表示没有食物被吃
+        # ============= 食物碰撞检测(双蛇竞争) =============
+        eaten_food_indices = []  # 被吃掉的食物索引列表
         
         for i, food in enumerate(self.foods):
-            # 计算蛇头与食物中心的欧几里得距离
-            food_distance = math.sqrt((new_head[0] - food[0])**2 + (new_head[1] - food[1])**2)
+            # 检查玩家1是否吃到食物(仅在移动时)
+            if player1_moved:
+                food_distance1 = math.sqrt((new_head1[0] - food[0])**2 + (new_head1[1] - food[1])**2)
+                if food_distance1 < CELL_SIZE:
+                    eaten_food_indices.append((i, 1))  # (食物索引, 吃到的玩家)
+                    continue
             
-            # 如果距离小于一个CELL_SIZE，认为食物被吃到
-            # 使用CELL_SIZE作为碰撞半径，提供合理的游戏手感
-            if food_distance < CELL_SIZE:
-                eaten_food_index = i  # 记录被吃掉的食物索引
-                break  # 找到第一个被吃的食物就退出循环
+            # 检查玩家2是否吃到食物(仅在移动时)
+            if player2_moved:
+                food_distance2 = math.sqrt((new_head2[0] - food[0])**2 + (new_head2[1] - food[1])**2)
+                if food_distance2 < CELL_SIZE:
+                    eaten_food_indices.append((i, 2))  # (食物索引, 吃到的玩家)
         
-        # ============= 食物消耗和奖励处理 =============
-        if eaten_food_index >= 0:
-            # 确实有食物被吃掉，执行相关奖励逻辑
-            
-            # 从食物列表中移除被吃掉的食物
-            self.foods.pop(eaten_food_index)
-            
-            # 增加游戏分数：每个食物价值1分
-            self.score += 1  
-            
-            # 蛇身长度增长：每吃一个食物增长2节
-            # 这个数值影响游戏难度和成就感的平衡
-            self.snake_length += 2  
-            
-            # 触发智能食物管理系统：根据当前食物数量随机生成新食物
-            # 这维持了游戏中食物数量的动态平衡
+        # 处理食物消耗(按索引倒序删除避免索引错位)
+        for food_index, player in sorted(eaten_food_indices, reverse=True):
+            self.foods.pop(food_index)
+            if player == 1:
+                self.score1 += 1
+                self.snake1_length += 2
+            else:
+                self.score2 += 1
+                self.snake2_length += 2
+        
+        # 如果有食物被吃，触发食物管理
+        if eaten_food_indices:
             self.manage_food_count()
         
-        # ============= 蛇身位置重计算 =============
-        # 根据最新的轨迹和蛇长度，重新计算所有蛇身节段的位置
-        # 这是轨迹跟随系统的核心执行部分
-        self.update_snake_body()
+        # ============= 更新蛇身位置 =============
+        self.update_snake_body()      # 玩家1
+        self.update_snake2_body()     # 玩家2
         
         # ============= 自身碰撞检测 =============
-        # 检查蛇头是否与自己的身体发生碰撞
-        # 跳过前4节身体以避免误检测（蛇头附近的节段距离很近）
-        if len(self.snake) > 4:
-            for i in range(4, len(self.snake)):
-                # 计算蛇头与每个身体节段的距离
+        # 检查玩家1自身碰撞(仅在移动时)
+        if player1_moved and len(self.snake1) > 4:
+            for i in range(4, len(self.snake1)):
                 collision_distance = math.sqrt(
-                    (new_head[0] - self.snake[i][0])**2 + 
-                    (new_head[1] - self.snake[i][1])**2
+                    (new_head1[0] - self.snake1[i][0])**2 + 
+                    (new_head1[1] - self.snake1[i][1])**2
                 )
-                
-                # 使用0.7倍CELL_SIZE作为碰撞判定距离
-                # 这个系数提供了合适的碰撞容错，避免过于严格的判定
                 if collision_distance < CELL_SIZE * 0.7:
-                    self.game_over = True  # 检测到自身碰撞，游戏结束
+                    self.game_over = True
+                    self.winner = 2  # 玩家2获胜
                     return
+        
+        # 检查玩家2自身碰撞(仅在移动时)
+        if player2_moved and len(self.snake2) > 4:
+            for i in range(4, len(self.snake2)):
+                collision_distance = math.sqrt(
+                    (new_head2[0] - self.snake2[i][0])**2 + 
+                    (new_head2[1] - self.snake2[i][1])**2
+                )
+                if collision_distance < CELL_SIZE * 0.7:
+                    self.game_over = True
+                    self.winner = 1  # 玩家1获胜
+                    return
+        
+        # ============= 蛇与蛇碰撞检测 =============
+        # 检查玩家1蛇头是否撞到玩家2蛇身(仅在玩家1移动时)
+        if player1_moved:
+            for segment in self.snake2:
+                collision_distance = math.sqrt(
+                    (new_head1[0] - segment[0])**2 + 
+                    (new_head1[1] - segment[1])**2
+                )
+                if collision_distance < CELL_SIZE * 0.7:
+                    self.game_over = True
+                    self.winner = 2  # 玩家2获胜
+                    return
+        
+        # 检查玩家2蛇头是否撞到玩家1蛇身(仅在玩家2移动时)
+        if player2_moved:
+            for segment in self.snake1:
+                collision_distance = math.sqrt(
+                    (new_head2[0] - segment[0])**2 + 
+                    (new_head2[1] - segment[1])**2
+                )
+                if collision_distance < CELL_SIZE * 0.7:
+                    self.game_over = True
+                    self.winner = 1  # 玩家1获胜
+                    return
+        
+        # 检查蛇头相撞(平局) - 只有双方都移动时才检测
+        if player1_moved and player2_moved:
+            head_collision_distance = math.sqrt(
+                (new_head1[0] - new_head2[0])**2 + 
+                (new_head1[1] - new_head2[1])**2
+            )
+            if head_collision_distance < CELL_SIZE * 0.7:
+                self.game_over = True
+                self.winner = None  # 平局
+                return
             
     def draw(self):
         """
-        游戏渲染方法 - 绘制所有可视化元素
+        双蛇对战游戏渲染方法 - 绘制所有可视化元素
         
         这个方法负责将游戏的当前状态绘制到屏幕上，包括：
         1. 清空屏幕背景
-        2. 绘制蛇身和蛇头
+        2. 绘制两条不同颜色的蛇(绿色和蓝色)
         3. 绘制所有食物
-        4. 显示游戏信息(分数、食物数量)
+        4. 显示双方分数和游戏信息
         5. 显示游戏状态提示(开始提示、游戏结束界面)
         
         渲染顺序很重要：后绘制的元素会覆盖先绘制的元素。
@@ -576,9 +692,9 @@ class SnakeGame:
         # 这相当于"擦黑板"，清除上一帧的所有内容
         self.screen.fill(BLACK)
         
-        # ============= 绘制蛇身系统 =============
+        # ============= 绘制玩家1蛇身系统(绿色) =============
         # 按照从蛇头到蛇尾的顺序绘制每个身体节段
-        for i, segment in enumerate(self.snake):
+        for i, segment in enumerate(self.snake1):
             # 根据节段位置决定颜色：蛇头使用深绿色，蛇身使用亮绿色
             # 这种颜色区分帮助玩家快速识别蛇头位置
             if i == 0:
@@ -591,45 +707,89 @@ class SnakeGame:
             pygame.draw.circle(self.screen, color, 
                              (int(segment[0]), int(segment[1])),  # 圆心坐标(转为整数像素)
                              CELL_SIZE // 2 - 1)                 # 半径(留1像素间隙)
+        
+        # ============= 绘制玩家2蛇身系统(蓝色) =============
+        # 按照从蛇头到蛇尾的顺序绘制每个身体节段
+        for i, segment in enumerate(self.snake2):
+            # 根据节段位置决定颜色：蛇头使用深蓝色，蛇身使用亮蓝色
+            # 与玩家1形成鲜明对比，便于区分
+            if i == 0:
+                color = DARK_BLUE   # 蛇头：深蓝色，更显眼
+            else:
+                color = BLUE        # 蛇身：亮蓝色，与蛇头区分
+            
+            # 绘制圆形节段：与玩家1相同的绘制方式
+            pygame.draw.circle(self.screen, color, 
+                             (int(segment[0]), int(segment[1])),  # 圆心坐标(转为整数像素)
+                             CELL_SIZE // 2 - 1)                 # 半径(留1像素间隙)
             
         # ============= 绘制食物系统 =============
         # 绘制屏幕上的所有食物
         for food in self.foods:
-            # 食物使用红色圆形表示，与蛇身形成鲜明对比
+            # 食物使用红色圆形表示，与两条蛇形成鲜明对比
             # 大小与蛇身节段相同，方便玩家判断碰撞范围
             pygame.draw.circle(self.screen, RED, 
                              (int(food[0]), int(food[1])),    # 食物中心坐标
                              CELL_SIZE // 2 - 1)             # 与蛇身相同的半径
         
-        # ============= 游戏信息显示 =============
-        # 显示当前游戏分数
-        score_text = self.font.render(f"Score: {self.score}", True, WHITE)
-        self.screen.blit(score_text, (10, 10))  # 左上角位置显示分数
+        # ============= 双方分数信息显示 =============
+        # 显示玩家1分数(左上角)
+        score1_text = self.font.render(f"Player1(Mouse): {self.score1}", True, GREEN)
+        self.screen.blit(score1_text, (10, 10))  # 左上角位置显示分数
         
-        # 显示当前食物数量（开发调试信息，帮助验证食物管理系统）
+        # 显示AI玩家分数(右上角)
+        score2_text = self.font.render(f"AI Player: {self.score2}", True, BLUE)
+        score2_rect = score2_text.get_rect()
+        self.screen.blit(score2_text, (WINDOW_SIZE - score2_rect.width - 10, 10))  # 右上角位置
+        
+        # 显示当前食物数量和AI速度信息（开发调试信息）
         food_count_text = self.font.render(f"Foods: {len(self.foods)}", True, WHITE)
         self.screen.blit(food_count_text, (10, 50))  # 分数下方显示食物数量
+        
+        # 显示AI当前移动间隔（速度信息）
+        ai_speed_text = self.font.render(f"AI Speed: {self.current_ai_interval}ms", True, WHITE)
+        self.screen.blit(ai_speed_text, (10, 85))  # 显示AI当前决策间隔
         
         # ============= 游戏状态提示界面 =============
         # 游戏开始前的提示界面
         if not self.game_started and not self.game_over:
-            # 显示"移动鼠标开始游戏"提示
-            start_text = self.font.render("Move mouse to start", True, WHITE)
-            # 将文字居中显示在屏幕中央
-            text_rect = start_text.get_rect(center=(WINDOW_SIZE // 2, WINDOW_SIZE // 2))
-            self.screen.blit(start_text, text_rect)
+            # 显示人机对战游戏开始提示
+            start_texts = [
+                "Human vs AI Snake Battle!",
+                "Player: Move mouse to control green snake",
+                "AI: Controls blue snake automatically",
+                "Move mouse to start the battle!"
+            ]
+            
+            # 垂直居中显示多行提示文字
+            total_height = len(start_texts) * 40  # 每行40像素高度
+            start_y = (WINDOW_SIZE - total_height) // 2
+            
+            for i, text in enumerate(start_texts):
+                rendered_text = self.font.render(text, True, WHITE)
+                text_rect = rendered_text.get_rect(center=(WINDOW_SIZE // 2, start_y + i * 40))
+                self.screen.blit(rendered_text, text_rect)
         
         # 游戏结束界面
         if self.game_over:
             # ============= 游戏结束信息准备 =============
-            # 创建游戏结束界面的所有文本元素
-            game_over_text = self.font.render("Game Over!", True, WHITE)          # 游戏结束标题
-            score_text = self.font.render(f"Final Score: {self.score}", True, WHITE)  # 最终分数
-            restart_text = self.font.render("Press R or SPACE to restart", True, WHITE)  # 重启说明
-            quit_text = self.font.render("Press ESC to quit", True, WHITE)              # 退出说明
+            # 根据胜负情况创建不同的结束界面
+            if self.winner == 1:
+                game_over_text = self.font.render("Human Player Wins!", True, GREEN)
+            elif self.winner == 2:
+                game_over_text = self.font.render("AI Player Wins!", True, BLUE)
+            else:
+                game_over_text = self.font.render("Draw! Both players crashed!", True, WHITE)
+            
+            # 显示最终分数
+            final_score_text = self.font.render(f"Final Scores - Human: {self.score1}  AI: {self.score2}", True, WHITE)
+            
+            # 重启说明
+            restart_text = self.font.render("Press R or SPACE to restart", True, WHITE)
+            quit_text = self.font.render("Press ESC to quit", True, WHITE)
             
             # 将所有文本组织成列表，便于批量处理
-            texts = [game_over_text, score_text, restart_text, quit_text]
+            texts = [game_over_text, final_score_text, restart_text, quit_text]
             
             # ============= 垂直居中布局计算 =============
             # 计算所有文本的总高度，用于垂直居中对齐
