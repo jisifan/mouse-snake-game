@@ -1,25 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-贪吃蛇强化学习环境
-===================
+贪吃蛇强化学习环境 - 高效AI版本
+================================
 
-基于OpenAI Gym的贪吃蛇多智能体对抗环境，支持：
-- 双AI对抗训练
-- 观察空间：蛇头位置、对手信息、食物位置、危险检测
-- 动作空间：8方向移动
-- 奖励系统：生存、吃食物、避免死亡的综合奖励
+基于OpenAI Gym的贪吃蛇多智能体对抗环境，专为训练高效积极的AI设计：
+
+核心特色：
+- 递进式里程碑奖励：5食物(+200)、10食物(+300)、20食物(+500)
+- 移动效率奖励：接近食物+5分，远离食物-3分
+- 无效循环惩罚：原地打转-10分
+- 竞争激励：领先优势奖励，追赶动机
+- 大幅食物奖励：每个食物+50分直接奖励
+
+设计理念：
+1. 短期可达目标激励持续进步
+2. 效率导向防止无意义移动
+3. 竞争机制保持对抗性
+4. 重奖励轻惩罚，积极强化学习
 
 作者: Claude Code Assistant
-依赖: gym, numpy, pygame
+依赖: gymnasium, numpy, pygame
 """
 
-import gym
+import gymnasium as gym
 import numpy as np
 import pygame
 import math
 import random
 from typing import Tuple, List, Dict, Optional
-from gym import spaces
+from gymnasium import spaces
 
 class SnakeRLEnv(gym.Env):
     """
@@ -73,6 +82,23 @@ class SnakeRLEnv(gym.Env):
         self.foods = []         # 食物列表
         self.current_step = 0   # 当前步数
         
+        # ============= 得分和里程碑系统 =============
+        self.snake1_score = 0   # 蛇1得分（基于吃到的食物数量）
+        self.snake2_score = 0   # 蛇2得分
+        
+        # 递进式里程碑系统（更合理的短期目标）
+        self.snake1_milestones = {'5': False, '10': False, '20': False}  # 里程碑达成状态
+        self.snake2_milestones = {'5': False, '10': False, '20': False}
+        
+        # 效率追踪系统
+        self.snake1_last_positions = []  # 记录最近的位置用于检测循环
+        self.snake2_last_positions = []
+        self.position_history_limit = 20  # 位置历史记录限制
+        
+        # 食物距离追踪（用于效率奖励）
+        self.snake1_last_food_distance = None
+        self.snake2_last_food_distance = None
+        
         # 当前方向（用于状态表示）
         self.snake1_direction = (0, 0)
         self.snake2_direction = (0, 0)
@@ -82,7 +108,7 @@ class SnakeRLEnv(gym.Env):
         self.screen = None
         self.clock = None
         
-    def reset(self) -> Tuple[np.ndarray, np.ndarray]:
+    def reset(self, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
         """
         重置环境到初始状态
         
@@ -109,8 +135,20 @@ class SnakeRLEnv(gym.Env):
         self.foods = []
         self.generate_foods(5)
         
-        # 重置步数
+        # 重置步数和得分系统
         self.current_step = 0
+        self.snake1_score = 0
+        self.snake2_score = 0
+        
+        # 重置递进式里程碑
+        self.snake1_milestones = {'5': False, '10': False, '20': False}
+        self.snake2_milestones = {'5': False, '10': False, '20': False}
+        
+        # 重置效率追踪
+        self.snake1_last_positions = []
+        self.snake2_last_positions = []
+        self.snake1_last_food_distance = None
+        self.snake2_last_food_distance = None
         
         # 返回初始观察
         obs1 = self._get_observation(1)
@@ -179,6 +217,10 @@ class SnakeRLEnv(gym.Env):
         info = {
             'snake1_length': self.snake1_length,
             'snake2_length': self.snake2_length,
+            'snake1_score': self.snake1_score,
+            'snake2_score': self.snake2_score,
+            'snake1_milestones': self.snake1_milestones.copy(),  # 递进式里程碑状态
+            'snake2_milestones': self.snake2_milestones.copy(),  # 递进式里程碑状态
             'step': self.current_step,
             'death_reason': death_reason
         }
@@ -391,7 +433,13 @@ class SnakeRLEnv(gym.Env):
     def _calculate_rewards(self, new_head1: Tuple[int, int], new_head2: Tuple[int, int], 
                           done1: bool, done2: bool, death_reason: str) -> Tuple[float, float]:
         """
-        计算奖励
+        新的高效AI奖励系统
+        
+        设计理念：
+        1. 递进式里程碑：5食物、10食物、20食物的阶梯奖励
+        2. 效率导向：接近食物奖励，远离食物惩罚
+        3. 无效移动惩罚：防止AI在原地打转
+        4. 竞争激励：领先和追赶的动态奖励
         
         参数:
             new_head1: 蛇1新位置
@@ -405,41 +453,186 @@ class SnakeRLEnv(gym.Env):
         """
         reward1, reward2 = 0.0, 0.0
         
+        # ============= 递进式里程碑奖励系统 =============
+        reward1 += self._calculate_milestone_rewards(1)
+        reward2 += self._calculate_milestone_rewards(2)
+        
+        # ============= 吃食物直接奖励 =============
+        food_reward1, food_reward2 = self._calculate_food_rewards(new_head1, new_head2)
+        reward1 += food_reward1
+        reward2 += food_reward2
+        
+        # ============= 移动效率奖励/惩罚 =============
+        if not done1:
+            efficiency_reward1 = self._calculate_movement_efficiency(1, new_head1)
+            reward1 += efficiency_reward1
+            
+        if not done2:
+            efficiency_reward2 = self._calculate_movement_efficiency(2, new_head2)
+            reward2 += efficiency_reward2
+            
+        # ============= 无效循环惩罚 =============
+        if not done1:
+            loop_penalty1 = self._check_movement_loops(1, new_head1)
+            reward1 += loop_penalty1
+            
+        if not done2:
+            loop_penalty2 = self._check_movement_loops(2, new_head2)
+            reward2 += loop_penalty2
+        
+        # ============= 竞争优势奖励 =============
+        competition_reward1, competition_reward2 = self._calculate_competition_rewards()
+        reward1 += competition_reward1
+        reward2 += competition_reward2
+        
         # ============= 死亡惩罚 =============
+        death_penalty1, death_penalty2 = self._calculate_death_penalties(done1, done2, death_reason)
+        reward1 += death_penalty1
+        reward2 += death_penalty2
+        
+        # ============= 基础存活奖励 =============
+        if not done1:
+            reward1 += 1.0  # 增加基础存活奖励，鼓励长期生存
+        if not done2:
+            reward2 += 1.0
+        
+        return reward1, reward2
+    
+    def _calculate_milestone_rewards(self, snake_id: int) -> float:
+        """计算递进式里程碑奖励"""
+        reward = 0.0
+        score = self.snake1_score if snake_id == 1 else self.snake2_score
+        milestones = self.snake1_milestones if snake_id == 1 else self.snake2_milestones
+        
+        # 检查5食物里程碑
+        if score >= 5 and not milestones['5']:
+            milestones['5'] = True
+            reward += 200  # 5食物里程碑奖励
+            print(f"Snake {snake_id} reached 5 food milestone! Score: {score}")
+            
+        # 检查10食物里程碑
+        if score >= 10 and not milestones['10']:
+            milestones['10'] = True
+            reward += 300  # 10食物里程碑奖励
+            print(f"Snake {snake_id} reached 10 food milestone! Score: {score}")
+            
+        # 检查20食物里程碑
+        if score >= 20 and not milestones['20']:
+            milestones['20'] = True
+            reward += 500  # 20食物里程碑奖励
+            print(f"Snake {snake_id} reached 20 food milestone! Score: {score}")
+        
+        return reward
+    
+    def _calculate_food_rewards(self, new_head1: Tuple[int, int], new_head2: Tuple[int, int]) -> Tuple[float, float]:
+        """计算吃食物的直接奖励"""
+        reward1, reward2 = 0.0, 0.0
+        
+        for food in self.foods:
+            # 检查蛇1是否吃到食物
+            if math.sqrt((new_head1[0] - food[0])**2 + (new_head1[1] - food[1])**2) < self.cell_size:
+                reward1 += 50  # 大幅增加吃食物奖励
+                
+            # 检查蛇2是否吃到食物
+            if math.sqrt((new_head2[0] - food[0])**2 + (new_head2[1] - food[1])**2) < self.cell_size:
+                reward2 += 50  # 大幅增加吃食物奖励
+                
+        return reward1, reward2
+    
+    def _calculate_movement_efficiency(self, snake_id: int, new_head: Tuple[int, int]) -> float:
+        """计算移动效率奖励/惩罚"""
+        if not self.foods:
+            return 0.0
+            
+        # 找到最近的食物
+        closest_food = min(self.foods, key=lambda f: math.sqrt((f[0] - new_head[0])**2 + (f[1] - new_head[1])**2))
+        current_distance = math.sqrt((closest_food[0] - new_head[0])**2 + (closest_food[1] - new_head[1])**2)
+        
+        # 获取上一次的距离
+        if snake_id == 1:
+            last_distance = self.snake1_last_food_distance
+            self.snake1_last_food_distance = current_distance
+        else:
+            last_distance = self.snake2_last_food_distance
+            self.snake2_last_food_distance = current_distance
+            
+        if last_distance is None:
+            return 0.0  # 第一步没有比较基准
+            
+        # 计算效率奖励
+        distance_change = last_distance - current_distance
+        
+        if distance_change > 0:
+            # 接近食物，给予奖励
+            return min(distance_change * 0.1, 5.0)  # 上限5分
+        else:
+            # 远离食物，给予惩罚
+            return max(distance_change * 0.15, -3.0)  # 惩罚更重，下限-3分
+    
+    def _check_movement_loops(self, snake_id: int, new_head: Tuple[int, int]) -> float:
+        """检查无效循环移动并给予惩罚"""
+        if snake_id == 1:
+            positions = self.snake1_last_positions
+        else:
+            positions = self.snake2_last_positions
+            
+        # 添加新位置
+        positions.append(new_head)
+        
+        # 限制历史长度
+        if len(positions) > self.position_history_limit:
+            positions.pop(0)
+            
+        # 检查是否有重复的小范围移动
+        if len(positions) >= 8:
+            recent_positions = positions[-8:]
+            
+            # 计算位置的标准差，如果太小说明在原地打转
+            x_coords = [pos[0] for pos in recent_positions]
+            y_coords = [pos[1] for pos in recent_positions]
+            
+            x_std = np.std(x_coords) if len(set(x_coords)) > 1 else 0
+            y_std = np.std(y_coords) if len(set(y_coords)) > 1 else 0
+            
+            # 如果移动范围太小，给予惩罚
+            movement_range = x_std + y_std
+            if movement_range < 20:  # 移动范围小于20像素认为是无效循环
+                return -10.0  # 无效循环惩罚
+                
+        return 0.0
+    
+    def _calculate_competition_rewards(self) -> Tuple[float, float]:
+        """计算竞争奖励"""
+        score_diff = self.snake1_score - self.snake2_score
+        
+        if score_diff > 0:
+            # 蛇1领先
+            return min(score_diff * 2.0, 10.0), max(-score_diff * 1.0, -5.0)
+        elif score_diff < 0:
+            # 蛇2领先  
+            return max(score_diff * 1.0, -5.0), min(abs(score_diff) * 2.0, 10.0)
+        else:
+            # 平局
+            return 0.0, 0.0
+    
+    def _calculate_death_penalties(self, done1: bool, done2: bool, death_reason: str) -> Tuple[float, float]:
+        """计算死亡惩罚"""
+        penalty1, penalty2 = 0.0, 0.0
+        
         if done1:
             if "snake1" in death_reason and "snake2" not in death_reason:
-                reward1 -= 100  # 自己死亡
-                reward2 += 50   # 对手获胜
+                penalty1 = -200  # 增加死亡惩罚
+                penalty2 = +100  # 对手获胜奖励
             elif death_reason == "head_collision":
-                reward1 -= 50   # 平局
-                reward2 -= 50
+                penalty1 = -100  # 平局惩罚
+                penalty2 = -100
         
         if done2:
             if "snake2" in death_reason and "snake1" not in death_reason:
-                reward2 -= 100  # 自己死亡
-                reward1 += 50   # 对手获胜
-        
-        # ============= 存活奖励 =============
-        if not done1:
-            reward1 += 0.1
-        if not done2:
-            reward2 += 0.1
-        
-        # ============= 接近食物奖励 =============
-        if self.foods and not done1:
-            closest_food_dist1 = min([math.sqrt((new_head1[0] - food[0])**2 + (new_head1[1] - food[1])**2) 
-                                     for food in self.foods])
-            # 距离越近，奖励越高
-            food_reward1 = max(0, (100 - closest_food_dist1) / 100.0)
-            reward1 += food_reward1 * 0.5
-        
-        if self.foods and not done2:
-            closest_food_dist2 = min([math.sqrt((new_head2[0] - food[0])**2 + (new_head2[1] - food[1])**2) 
-                                     for food in self.foods])
-            food_reward2 = max(0, (100 - closest_food_dist2) / 100.0)
-            reward2 += food_reward2 * 0.5
-        
-        return reward1, reward2
+                penalty2 = -200  # 增加死亡惩罚
+                penalty1 = +100  # 对手获胜奖励
+                
+        return penalty1, penalty2
     
     def _update_snake(self, snake_id: int, new_head: Tuple[int, int]):
         """更新蛇的位置"""
@@ -504,12 +697,14 @@ class SnakeRLEnv(gym.Env):
             if math.sqrt((new_head1[0] - food[0])**2 + (new_head1[1] - food[1])**2) < self.cell_size:
                 eaten_indices.append(i)
                 self.snake1_length += 2
+                self.snake1_score += 1  # 每吃一个食物得1分（用于里程碑计算）
                 continue
             
             # 检查蛇2
             if math.sqrt((new_head2[0] - food[0])**2 + (new_head2[1] - food[1])**2) < self.cell_size:
                 eaten_indices.append(i)
                 self.snake2_length += 2
+                self.snake2_score += 1  # 每吃一个食物得1分（用于里程碑计算）
         
         # 删除被吃的食物
         for i in sorted(eaten_indices, reverse=True):

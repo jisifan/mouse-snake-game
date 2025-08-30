@@ -13,7 +13,7 @@
 依赖: stable-baselines3, gym, numpy
 """
 
-import gym
+import gymnasium as gym
 import numpy as np
 import os
 from typing import Dict, Tuple, Any, Optional
@@ -59,10 +59,12 @@ class MultiAgentWrapper(gym.Env):
         """设置对手模型（用于自对弈）"""
         self.opponent_agent = opponent_model
         
-    def reset(self):
+    def reset(self, **kwargs):
         """重置环境"""
         obs1, obs2 = self.env.reset()
-        return obs1 if self.agent_id == 1 else obs2
+        my_obs = obs1 if self.agent_id == 1 else obs2
+        info = {}
+        return my_obs, info
     
     def step(self, action):
         """执行一步动作"""
@@ -99,7 +101,7 @@ class MultiAgentWrapper(gym.Env):
             else:
                 self.win_rate.append(0.5)  # 平局
         
-        return my_obs, my_reward, my_done, info
+        return my_obs, my_reward, my_done, False, info
     
     def _get_opponent_obs(self):
         """获取对手的观察（需要从环境状态构建）"""

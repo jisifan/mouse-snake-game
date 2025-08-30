@@ -48,11 +48,12 @@ class RLSnakeAI:
         # 尝试加载强化学习模型
         self.rl_model = self._load_rl_model(model_path)
         
-        # 后备策略使用的状态
-        self.last_positions = []
-        self.stuck_counter = 0
         
         print(f"RLSnakeAI initialized. Using {'RL model' if self.rl_model else 'intelligent random strategy'}")
+    
+    def reset(self):
+        """重置AI状态"""
+        pass
     
     def _load_rl_model(self, model_path: Optional[str]):
         """加载强化学习模型"""
@@ -99,12 +100,13 @@ class RLSnakeAI:
             try:
                 observation = self._create_observation(my_snake, opponent_snake, foods, current_direction)
                 action_idx, _ = self.rl_model.predict(observation, deterministic=False)
+                # print(f"RL model predicted action: {self.actions[action_idx]}")
                 return self.actions[action_idx]
             except Exception as e:
                 print(f"RL model prediction failed: {e}, falling back to intelligent strategy")
         
-        # 后备策略：智能随机行为
-        return self._intelligent_fallback_strategy(my_snake, opponent_snake, foods, current_direction)
+        # 如果没有强化学习模型，返回当前方向
+        return current_direction
     
     def _create_observation(self, my_snake: List[Tuple[int, int]], 
                            opponent_snake: List[Tuple[int, int]],
@@ -206,153 +208,13 @@ class RLSnakeAI:
         
         return dangers
     
-    def _intelligent_fallback_strategy(self, my_snake: List[Tuple[int, int]], 
-                                     opponent_snake: List[Tuple[int, int]],
-                                     foods: List[Tuple[int, int]], 
-                                     current_direction: Tuple[int, int]) -> Tuple[int, int]:
-        """
-        智能后备策略
-        
-        当强化学习模型不可用时使用的智能随机策略，
-        比纯随机更聪明，会避免明显的危险并追求食物。
-        """
-        if not my_snake:
-            return current_direction
-        
-        my_head = my_snake[0]
-        
-        # 检测困住情况
-        self._update_stuck_detection(my_head)
-        
-        # 获取所有可能的安全方向
-        safe_directions = []
-        food_directions = []
-        
-        for direction in self.actions:
-            next_pos = (
-                my_head[0] + direction[0] * self.segment_distance,
-                my_head[1] + direction[1] * self.segment_distance
-            )
-            
-            # 安全性检查
-            if self._is_position_safe(next_pos, my_snake, opponent_snake):
-                safe_directions.append(direction)
-                
-                # 如果这个方向能接近食物，给予额外权重
-                if foods:
-                    closest_food = min(foods, key=lambda f: math.sqrt((f[0] - my_head[0])**2 + (f[1] - my_head[1])**2))
-                    
-                    # 检查这个方向是否让我们更接近食物
-                    current_dist = math.sqrt((my_head[0] - closest_food[0])**2 + (my_head[1] - closest_food[1])**2)
-                    new_dist = math.sqrt((next_pos[0] - closest_food[0])**2 + (next_pos[1] - closest_food[1])**2)
-                    
-                    if new_dist < current_dist:
-                        food_directions.append(direction)
-        
-        # 决策逻辑
-        if self.stuck_counter > 5:
-            # 如果困住了，选择任何安全方向，即使远离当前方向
-            if safe_directions:
-                return random.choice(safe_directions)
-        
-        # 优先选择接近食物的安全方向
-        if food_directions:
-            return random.choice(food_directions)
-        
-        # 其次选择其他安全方向
-        if safe_directions:
-            # 优先选择与当前方向相似的方向（保持连续性）
-            if current_direction in safe_directions:
-                if random.random() < 0.7:  # 70%概率继续当前方向
-                    return current_direction
-            return random.choice(safe_directions)
-        
-        # 如果没有安全方向，选择最不危险的方向
-        direction_dangers = []
-        for direction in self.actions:
-            next_pos = (
-                my_head[0] + direction[0] * self.segment_distance,
-                my_head[1] + direction[1] * self.segment_distance
-            )
-            danger_score = self._calculate_position_danger(next_pos, my_snake, opponent_snake)
-            direction_dangers.append((direction, danger_score))
-        
-        # 选择危险度最低的方向
-        direction_dangers.sort(key=lambda x: x[1])
-        return direction_dangers[0][0]
     
-    def _update_stuck_detection(self, current_pos: Tuple[int, int]):
-        """更新困住检测"""
-        self.last_positions.append(current_pos)
-        if len(self.last_positions) > 10:
-            self.last_positions.pop(0)
-        
-        # 检查是否在小范围内重复移动
-        if len(self.last_positions) >= 8:
-            recent_positions = self.last_positions[-8:]
-            unique_positions = len(set(recent_positions))
-            if unique_positions <= 3:  # 在很小范围内移动
-                self.stuck_counter += 1
-            else:
-                self.stuck_counter = max(0, self.stuck_counter - 1)
     
-    def _is_position_safe(self, pos: Tuple[int, int], 
-                         my_snake: List[Tuple[int, int]],
-                         opponent_snake: List[Tuple[int, int]]) -> bool:
-        """检查位置是否安全"""
-        # 检查边界
-        boundary_margin = self.cell_size // 2
-        if (pos[0] < boundary_margin or 
-            pos[0] >= self.window_size - boundary_margin or
-            pos[1] < boundary_margin or 
-            pos[1] >= self.window_size - boundary_margin):
-            return False
-            
-        # 检查与自己身体的碰撞
-        for segment in my_snake[1:]:
-            distance = math.sqrt((pos[0] - segment[0])**2 + (pos[1] - segment[1])**2)
-            if distance < self.cell_size * 0.8:
-                return False
-                
-        # 检查与对手的碰撞
-        for segment in opponent_snake:
-            distance = math.sqrt((pos[0] - segment[0])**2 + (pos[1] - segment[1])**2)
-            if distance < self.cell_size * 0.8:
-                return False
-                
-        return True
     
-    def _calculate_position_danger(self, pos: Tuple[int, int],
-                                  my_snake: List[Tuple[int, int]], 
-                                  opponent_snake: List[Tuple[int, int]]) -> float:
-        """计算位置的危险度分数（越高越危险）"""
-        danger = 0.0
-        
-        # 边界危险
-        boundary_margin = self.cell_size // 2
-        if (pos[0] < boundary_margin or 
-            pos[0] >= self.window_size - boundary_margin or
-            pos[1] < boundary_margin or 
-            pos[1] >= self.window_size - boundary_margin):
-            danger += 100
-        
-        # 自身碰撞危险
-        for segment in my_snake[1:]:
-            distance = math.sqrt((pos[0] - segment[0])**2 + (pos[1] - segment[1])**2)
-            if distance < self.cell_size:
-                danger += max(0, 50 - distance)
-        
-        # 对手碰撞危险
-        for segment in opponent_snake:
-            distance = math.sqrt((pos[0] - segment[0])**2 + (pos[1] - segment[1])**2)
-            if distance < self.cell_size * 1.5:
-                danger += max(0, 30 - distance)
-        
-        return danger
     
     def get_status(self) -> str:
         """获取AI状态信息"""
         if self.rl_model:
             return "RLSnakeAI: Using trained reinforcement learning model"
         else:
-            return f"RLSnakeAI: Using intelligent fallback strategy (stuck_counter: {self.stuck_counter})"
+            return "RLSnakeAI: No RL model available"
